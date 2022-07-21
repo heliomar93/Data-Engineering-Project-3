@@ -25,6 +25,7 @@ time_table_drop = "DROP TABLE IF EXISTS time_table"
 
 staging_events_table_create= ("""
  CREATE TABLE IF NOT EXISTS staging_events(
+ event_id INTEGER IDENTITY(0,1) PRIMARY KEY,
  artist        VARCHAR(200),
  auth          VARCHAR(200),
  firstName     VARCHAR(200),
@@ -36,7 +37,7 @@ staging_events_table_create= ("""
  location      VARCHAR(200),
  method        VARCHAR(200),
  page          VARCHAR(200),
- registration  NUMERIC,
+ registration  VARCHAR(15),
  sessionId     VARCHAR(200),
  song          VARCHAR(200),
  status        INT,
@@ -50,21 +51,22 @@ staging_songs_table_create = ("""
 CREATE TABLE IF NOT EXISTS staging_songs(
 song_id             VARCHAR(100),
 title               VARCHAR(200),
-duration            DECIMAL,
+duration            FLOAT,
 year                SMALLINT,
 artist_id           VARCHAR(100),
 artist_name         VARCHAR(200),
 artist_latitude     REAL,
 artist_longitude    REAL,
 artist_location     VARCHAR(200),
-num_songs           INT
+num_songs           INT,
+primary key(song_id)
 );
 """)
 
 songplay_table_create = ("""
 CREATE TABLE IF NOT EXISTS songplay(
-songplay_id INTEGER IDENTITY (1, 1) PRIMARY KEY, 
-start_time BIGINT sortkey, 
+songplay_id INTEGER IDENTITY(0, 1) PRIMARY KEY, 
+start_time TIMESTAMP sortkey, 
 user_id VARCHAR(200) NOT NULL, 
 level VARCHAR(100) NOT NULL, 
 artist_id VARCHAR(100), 
@@ -80,7 +82,8 @@ user_id VARCHAR(200) NOT NULL,
 first_name VARCHAR(200) NOT NULL, 
 last_name VARCHAR(200) NOT NULL, 
 gender VARCHAR(10) NOT NULL, 
-level VARCHAR(100) NOT NULL
+level VARCHAR(100) NOT NULL,
+PRIMARY KEY (user_id)
 );
 """)
 
@@ -90,7 +93,8 @@ song_id VARCHAR(100),
 title VARCHAR(200), 
 artist_id VARCHAR(100), 
 year SMALLINT sortkey, 
-duration FLOAT4
+duration FLOAT4,
+PRIMARY KEY(song_id)
 );
 """)
 
@@ -100,19 +104,21 @@ artist_id VARCHAR(100),
 artist_name VARCHAR(200), 
 location VARCHAR(200), 
 latitude DECIMAL, 
-longitude DECIMAL
+longitude DECIMAL,
+PRIMARY KEY(artist_id)
 );
 """)
 
 time_table_create = ("""
 CREATE TABLE IF NOT EXISTS time(
-start_time TIMESTAMP PRIMARY KEY, 
+start_time TIMESTAMP, 
 hour SMALLINT, 
 day SMALLINT, 
 week SMALLINT, 
 month SMALLINT, 
 year SMALLINT, 
-weekday SMALLINT
+weekday SMALLINT,
+PRIMARY KEY(start_time)
 );
 """)
 
@@ -123,7 +129,6 @@ COPY staging_events
 FROM {}
 iam_role {}
 REGION {}
-TIMEFORMAT as 'epochmillisecs'
 FORMAT AS json {};
 """).format(LOG_DATA,ARN,REGION,LOG_JSON_PATH)
 
@@ -138,8 +143,8 @@ FORMAT AS json 'auto';
 # FINAL TABLES
 
 songplay_table_insert = ("""
-INSERT INTO songplay (start_time,user_id, level, artist_id, session_id, location, user_agent)
-SELECT TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second', 
+INSERT INTO songplay(start_time,user_id, level, artist_id, session_id, location, user_agent)
+SELECT TIMESTAMP 'epoch' + se.ts * INTERVAL '1 Second',
        se.userId,
        se.level,
        ss.artist_id,
@@ -147,51 +152,83 @@ SELECT TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second',
        se.location,
        se.userAgent
 FROM staging_events se
-JOIN staging_songs ss ON se.song = ss.title AND se.artist = ss.artist_name
+JOIN staging_songs ss ON se.song = ss.title AND se.artist = ss.artist_name AND se.length = ss.duration
 WHERE se.page = 'NextSong';
 """)
 
 user_table_insert = ("""
-INSERT INTO users (user_id, first_name, last_name, gender, level)
-SELECT se.userID,
-       se.firstName,
-       se.lastName,
-       se.gender,
-       se.level
-FROM staging_events se
-WHERE se.page = 'NextSong';
+INSERT INTO users(user_id, first_name, last_name, gender, level)
+WITH uniq_staging_events AS (
+SELECT userId, 
+        firstName, 
+        lastName, 
+        gender, 
+        level,
+        ROW_NUMBER() OVER(PARTITION BY userid ORDER BY ts DESC) AS rank
+FROM staging_events
+WHERE userid != NULL
+    AND page = 'NextSong'
+)
+SELECT userId, 
+        firstName, 
+        lastName, 
+        gender, 
+        level
+FROM uniq_staging_events
+WHERE rank = 1;
+;
 """)
 
 song_table_insert = ("""
-INSERT INTO song (song_id, title, artist_id, year, duration)
+INSERT INTO song(song_id, title, artist_id, year, duration)
+WITH uniq_staging_songs AS (
+SELECT song_id,
+       title,
+       artist_id,
+       year,
+       duration,
+        ROW_NUMBER() OVER(PARTITION BY song_id ORDER BY year DESC) AS rank
+FROM staging_songs
+)
 SELECT song_id,
        title,
        artist_id,
        year,
        duration
-FROM staging_songs ss;
+FROM uniq_staging_songs
+WHERE rank = 1;
 """)
 
 artist_table_insert = ("""
 INSERT INTO artists(artist_id, artist_name, location, latitude, longitude)
-SELECT DISTINCT ss.artist_id, 
-                ss.artist_name, 
-                ss.artist_location,
-                ss.artist_latitude,
-                ss.artist_longitude
-FROM staging_songs ss;
+WITH uniq_staging_songs AS (
+SELECT artist_id,
+        artist_name, 
+        artist_location, 
+        artist_latitude, 
+        artist_longitude,
+        ROW_NUMBER() OVER(PARTITION BY artist_id ORDER BY year DESC) AS rank
+FROM staging_songs
+)
+SELECT artist_id,
+        artist_name, 
+        artist_location, 
+        artist_latitude, 
+        artist_longitude
+FROM uniq_staging_songs
+WHERE rank = 1;
 """)
 
 time_table_insert = ("""
 INSERT INTO time(start_time, hour, day, week, month, year, weekday)
-SELECT start_time,
-        EXTRACT(hour from start_time),
-        EXTRACT(day from start_time),
-        EXTRACT(week from start_time),
-        EXTRACT(month from start_time),
-        EXTRACT(year from start_time),
-        EXTRACT(dayofweek from start_time)
-FROM songplay;
+SELECT TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second',
+        EXTRACT(hour from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second'),
+        EXTRACT(day from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second'),
+        EXTRACT(week from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second'),
+        EXTRACT(month from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second'),
+        EXTRACT(year from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second'),
+        EXTRACT(dayofweek from TIMESTAMP 'epoch' + se.ts/1000 *INTERVAL '1 second')
+FROM staging_events se;
 """)
 
 # QUERY LISTS
