@@ -4,12 +4,18 @@ from sql_queries import create_table_queries, drop_table_queries
 
 
 def drop_tables(cur, conn):
+    """
+    This function drop all the tables, before create any table, in the database.
+    """
     for query in drop_table_queries:
         cur.execute(query)
         conn.commit()
 
 
 def create_tables(cur, conn):
+    """
+    This function create all the tables we'll use, the staging and the analytics ones.
+    """
     for query in create_table_queries:
         cur.execute(query)
         conn.commit()
